@@ -1,257 +1,179 @@
 import os
 import threading
-import time
 import tkinter.messagebox
 from tkinter import *
-from tkinter import filedialog
-
 from tkinter import ttk
-from ttkthemes import themed_tk as tk
+import numpy as np
+import pywt
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks, butter, lfilter, savgol_filter
+from collections import deque
+import serial
+import pygame
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from mutagen.mp3 import MP3
-from pygame import mixer
+# Serial setup for real-time ECG data acquisition
+ser = serial.Serial('COM6', 115200, timeout=1)
+ser.flush()
 
-root = tk.ThemedTk()
-root.get_themes()                 # Returns a list of all themes that can be set
-root.set_theme("radiance")         # Sets an available theme
+# Parameters for Butterworth filter
+def butter_lowpass(cutoff, fs, order=5):
+    nyquist = 0.5 * fs
+    normal_cutoff = cutoff / nyquist
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return b, a
 
-# Fonts - Arial (corresponds to Helvetica), Courier New (Courier), Comic Sans MS, Fixedsys,
-# MS Sans Serif, MS Serif, Symbol, System, Times New Roman (Times), and Verdana
-#
-# Styles - normal, bold, roman, italic, underline, and overstrike.
+def butter_lowpass_filter(data, cutoff, fs, order=5):
+    b, a = butter_lowpass(cutoff, fs, order)
+    return lfilter(b, a, data)
 
-statusbar = ttk.Label(root, text="Welcome to Melody", relief=SUNKEN, anchor=W, font='Times 10 italic')
-statusbar.pack(side=BOTTOM, fill=X)
+# Parameters for wavelet analysis
+sampling_rate = 100.0  # Hz
+cutoff_frequency = 20  # Hz
+ecg_buffer = deque(maxlen=1000)
+processed_signal_buffer = deque(maxlen=1000)
 
-# Create the menubar
-menubar = Menu(root)
-root.config(menu=menubar)
+# Music Player Initialization
+pygame.mixer.init()
+playlist = [
+    {"path": r"C:/Users/khanh/Downloads/Short Song (English Song) [W Lyrics] 30 seconds.mp3", "condition": "<60"},
+    {"path": r"C:/Users/khanh/Downloads/SHORT MUSIC - No Copyright Music - Royalty-free Music For Background 2023.mp3", "condition": "60-100"},
+    {"path": r"C:/Users/khanh/Downloads/DSP-Fix1/DSP-Fix1/Downloads/DSP/Python-Music-Player-master/100+/Let It Be (Remastered 2009).mp3", "condition": ">100"}
+]
+current_song_index = -1
 
-# Create the submenu
-
-subMenu = Menu(menubar, tearoff=0)
-
-playlist = []
-
-
-# playlist - contains the full path + filename
-# playlistbox - contains just the filename
-# Fullpath + filename is required to play the music inside play_music load function
-
-def browse_file():
-    global filename_path
-    filename_path = filedialog.askopenfilename()
-    add_to_playlist(filename_path)
-
-    mixer.music.queue(filename_path)
-
-
-def add_to_playlist(filename):
-    filename = os.path.basename(filename)
-    index = 0
-    playlistbox.insert(index, filename)
-    playlist.insert(index, filename_path)
-    index += 1
-
-
-menubar.add_cascade(label="File", menu=subMenu)
-subMenu.add_command(label="Open", command=browse_file)
-subMenu.add_command(label="Exit", command=root.destroy)
-
-
-def about_us():
-    tkinter.messagebox.showinfo('About Melody', 'This is a music player build using Python Tkinter by @attreyabhatt')
-
-
-subMenu = Menu(menubar, tearoff=0)
-menubar.add_cascade(label="Help", menu=subMenu)
-subMenu.add_command(label="About Us", command=about_us)
-
-mixer.init()  # initializing the mixer
-
-root.title("Melody")
-root.iconbitmap(r'C:/Users/PC/Downloads\DSP/Python-Music-Player-master/images/melody.ico')
-
-# Root Window - StatusBar, LeftFrame, RightFrame
-# LeftFrame - The listbox (playlist)
-# RightFrame - TopFrame,MiddleFrame and the BottomFrame
-
-leftframe = Frame(root)
-leftframe.pack(side=LEFT, padx=30, pady=30)
-
-playlistbox = Listbox(leftframe)
-playlistbox.pack()
-
-addBtn = ttk.Button(leftframe, text="+ Add", command=browse_file)
-addBtn.pack(side=LEFT)
-
-
-def del_song():
-    selected_song = playlistbox.curselection()
-    selected_song = int(selected_song[0])
-    playlistbox.delete(selected_song)
-    playlist.pop(selected_song)
-
-
-delBtn = ttk.Button(leftframe, text="- Del", command=del_song)
-delBtn.pack(side=LEFT)
-
-rightframe = Frame(root)
-rightframe.pack(pady=30)
-
-topframe = Frame(rightframe)
-topframe.pack()
-
-lengthlabel = ttk.Label(topframe, text='Total Length : --:--')
-lengthlabel.pack(pady=5)
-
-currenttimelabel = ttk.Label(topframe, text='Current Time : --:--', relief=GROOVE)
-currenttimelabel.pack()
-
-
-def show_details(play_song):
-    file_data = os.path.splitext(play_song)
-
-    if file_data[1] == '.mp3':
-        audio = MP3(play_song)
-        total_length = audio.info.length
+# Functions for heart rate and music selection
+def select_song_by_hr(hr):
+    if hr < 60:
+        return 0
+    elif 60 <= hr <= 100:
+        return 1
     else:
-        a = mixer.Sound(play_song)
-        total_length = a.get_length()
+        return 2
 
-    # div - total_length/60, mod - total_length % 60
-    mins, secs = divmod(total_length, 60)
-    mins = round(mins)
-    secs = round(secs)
-    timeformat = '{:02d}:{:02d}'.format(mins, secs)
-    lengthlabel['text'] = "Total Length" + ' - ' + timeformat
+def play_song(index):
+    global current_song_index
+    try:
+        if index != current_song_index:
+            song_path = playlist[index]["path"]
+            pygame.mixer.music.load(song_path)
+            pygame.mixer.music.play()
+            current_song_index = index
+            statusbar['text'] = f"Playing: {os.path.basename(song_path)}"
+    except IndexError:
+        tkinter.messagebox.showerror("Error", "Invalid song index or playlist is empty.")
 
-    t1 = threading.Thread(target=start_count, args=(total_length,))
-    t1.start()
-
-
-def start_count(t):
-    global paused
-    # mixer.music.get_busy(): - Returns FALSE when we press the stop button (music stop playing)
-    # Continue - Ignores all of the statements below it. We check if music is paused or not.
-    current_time = 0
-    while current_time <= t and mixer.music.get_busy():
-        if paused:
-            continue
-        else:
-            mins, secs = divmod(current_time, 60)
-            mins = round(mins)
-            secs = round(secs)
-            timeformat = '{:02d}:{:02d}'.format(mins, secs)
-            currenttimelabel['text'] = "Current Time" + ' - ' + timeformat
-            time.sleep(1)
-            current_time += 1
-
-
-def play_music():
-    global paused
-
-    if paused:
-        mixer.music.unpause()
-        statusbar['text'] = "Music Resumed"
-        paused = FALSE
-    else:
-        try:
-            stop_music()
-            time.sleep(1)
-            selected_song = playlistbox.curselection()
-            selected_song = int(selected_song[0])
-            play_it = playlist[selected_song]
-            mixer.music.load(play_it)
-            mixer.music.play()
-            statusbar['text'] = "Playing music" + ' - ' + os.path.basename(play_it)
-            show_details(play_it)
-        except:
-            tkinter.messagebox.showerror('File not found', 'Melody could not find the file. Please check again.')
-
-
-def stop_music():
-    mixer.music.stop()
-    statusbar['text'] = "Music Stopped"
-
-
-paused = FALSE
-
-
-def pause_music():
-    global paused
-    paused = TRUE
-    mixer.music.pause()
+def pause_song():
+    pygame.mixer.music.pause()
     statusbar['text'] = "Music Paused"
 
+def resume_song():
+    pygame.mixer.music.unpause()
+    statusbar['text'] = "Music Resumed"
 
-def rewind_music():
-    play_music()
-    statusbar['text'] = "Music Rewinded"
+def stop_song():
+    pygame.mixer.music.stop()
+    statusbar['text'] = "Music Stopped"
 
+def compute_heart_rate(ecg_signal, fs):
+    coeffs = pywt.swt(ecg_signal, 'sym4', level=3)
+    coeffs_for_reconstruction = [
+        (np.zeros_like(a), d if i in [2, 3] else np.zeros_like(d))
+        for i, (a, d) in enumerate(coeffs)
+    ]
+    reconstructed_signal = pywt.iswt(coeffs_for_reconstruction, 'sym4')
+    y = np.abs(reconstructed_signal) ** 2
+    avg = np.mean(y)
+    Rpeaks, _ = find_peaks(y, height=8 * avg, distance=int(fs / 2))
+    heart_rate = (len(Rpeaks) * 60) / (len(ecg_signal) / fs)
+    return heart_rate, y, Rpeaks
 
-def set_vol(val):
-    volume = float(val) / 100
-    mixer.music.set_volume(volume)
-    # set_volume of mixer takes value only from 0 to 1. Example - 0, 0.1,0.55,0.54.0.99,1
+# GUI setup
+root = Tk()
+root.geometry("900x700")
+root.title("Real-Time ECG and Music Player")
 
+statusbar = Label(root, text="Welcome to the ECG Music App", relief=SUNKEN, anchor=W, font='Times 10 italic')
+statusbar.pack(side=BOTTOM, fill=X)
 
-muted = FALSE
+fig, ax = plt.subplots(2, 1, figsize=(8, 6))
+ax[0].set_ylim(0, 2000)
+ax[0].set_xlim(0, 1000)
+ecg_line, = ax[0].plot([], [], lw=0.5)
+ax[0].set_title("Real-Time ECG Signal")
+ax[0].set_xlabel("Time (samples)")
+ax[0].set_ylabel("Amplitude")
+ax[0].grid(True)
 
+ax[1].set_xlim(0, 1000)
+ax[1].set_ylim(0, 100)
+processed_line, = ax[1].plot([], [], lw=0.5)
+ax[1].set_title("Heart Rate Peaks")
+ax[1].set_xlabel("Time (samples)")
+ax[1].grid(True)
 
-def mute_music():
-    global muted
-    if muted:  # Unmute the music
-        mixer.music.set_volume(0.7)
-        volumeBtn.configure(image=volumePhoto)
-        scale.set(70)
-        muted = FALSE
-    else:  # mute the music
-        mixer.music.set_volume(0)
-        volumeBtn.configure(image=mutePhoto)
-        scale.set(0)
-        muted = TRUE
+canvas = FigureCanvasTkAgg(fig, master=root)
+canvas_widget = canvas.get_tk_widget()
+canvas_widget.pack(side=TOP, fill=BOTH, expand=True)
 
+def update_data():
+    global ecg_buffer, processed_signal_buffer
+    if ser.in_waiting > 0:
+        try:
+            data = ser.readline().decode('utf-8').strip()
+            raw_value = float(data)
+            ecg_buffer.append(raw_value)
 
-middleframe = Frame(rightframe)
-middleframe.pack(pady=30, padx=30)
+            if len(ecg_buffer) >= 1000:
+                filtered_signal = butter_lowpass_filter(list(ecg_buffer), cutoff_frequency, sampling_rate)
+                filtered_signal = savgol_filter(filtered_signal, window_length=15, polyorder=3)
+                heart_rate, processed_signal, Rpeaks = compute_heart_rate(filtered_signal, sampling_rate)
+                if processed_signal is not None:
+                    processed_signal_buffer.clear()
+                    processed_signal_buffer.extend(processed_signal)
+                    play_song(select_song_by_hr(heart_rate))
+                    processed_line.set_data(range(len(processed_signal_buffer)), processed_signal_buffer)
+                    ax[1].clear()
+                    ax[1].plot(range(len(processed_signal_buffer)), processed_signal_buffer, lw=0.5)
+                    for peak in Rpeaks:
+                        ax[1].plot(peak, processed_signal[peak], 'ro')
+                    statusbar['text'] = f"Heart Rate: {heart_rate:.2f} BPM"
 
-playPhoto = PhotoImage(file='C:/Users/PC/Downloads\DSP/Python-Music-Player-master/images/play.png')
-playBtn = ttk.Button(middleframe, image=playPhoto, command=play_music)
-playBtn.grid(row=0, column=0, padx=10)
+            ecg_line.set_data(range(len(ecg_buffer)), ecg_buffer)
+            ax[0].clear()
+            ax[0].plot(range(len(ecg_buffer)), ecg_buffer, lw=0.5)
+            ax[0].set_ylim(1250, 3000)
+            ax[0].set_xlim(0, 1000)
 
-stopPhoto = PhotoImage(file='C:/Users/PC/Downloads\DSP/Python-Music-Player-master/images/stop.png')
-stopBtn = ttk.Button(middleframe, image=stopPhoto, command=stop_music)
-stopBtn.grid(row=0, column=1, padx=10)
+            canvas.draw()
+        except ValueError:
+            pass
 
-pausePhoto = PhotoImage(file='C:/Users/PC/Downloads\DSP/Python-Music-Player-master/images/pause.png')
-pauseBtn = ttk.Button(middleframe, image=pausePhoto, command=pause_music)
-pauseBtn.grid(row=0, column=2, padx=10)
+    root.after(10, update_data)
 
-# Bottom Frame for volume, rewind, mute etc.
+def start_measurement():
+    update_data()
 
-bottomframe = Frame(rightframe)
-bottomframe.pack()
+button_frame = Frame(root)
+button_frame.pack(pady=20)
 
-rewindPhoto = PhotoImage(file='C:/Users/PC/Downloads\DSP/Python-Music-Player-master/images/rewind.png')
-rewindBtn = ttk.Button(bottomframe, image=rewindPhoto, command=rewind_music)
-rewindBtn.grid(row=0, column=0)
+start_button = ttk.Button(button_frame, text="Start", command=start_measurement)
+start_button.grid(row=0, column=0, padx=10)
 
-mutePhoto = PhotoImage(file='C:/Users/PC/Downloads\DSP/Python-Music-Player-master/images/mute.png')
-volumePhoto = PhotoImage(file='C:/Users/PC/Downloads\DSP/Python-Music-Player-master/images/volume.png')
-volumeBtn = ttk.Button(bottomframe, image=volumePhoto, command=mute_music)
-volumeBtn.grid(row=0, column=1)
+pause_button = ttk.Button(button_frame, text="Pause Music", command=pause_song)
+pause_button.grid(row=0, column=1, padx=10)
 
-scale = ttk.Scale(bottomframe, from_=0, to=100, orient=HORIZONTAL, command=set_vol)
-scale.set(70)  # implement the default value of scale when music player starts
-mixer.music.set_volume(0.7)
-scale.grid(row=0, column=2, pady=15, padx=30)
+resume_button = ttk.Button(button_frame, text="Resume Music", command=resume_song)
+resume_button.grid(row=0, column=2, padx=10)
 
+stop_button = ttk.Button(button_frame, text="Stop Music", command=stop_song)
+stop_button.grid(row=0, column=3, padx=10)
 
 def on_closing():
-    stop_music()
+    if ser:
+        ser.close()
+    pygame.mixer.music.stop()
     root.destroy()
 
-
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.mainloop()
+root.mainloop() 
